@@ -110,7 +110,8 @@ pub struct SegmentODS {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageDataCode {
-    Pixels { color: u8, count: u16 },
+    Color { color: u8, count: u16 },
+    Transparent { count: u16 },
     EndOfLine,
 }
 
@@ -152,7 +153,7 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
     let v0 = buf[0];
     if v0 > 0 {
         return Ok((
-            ImageDataCode::Pixels {
+            ImageDataCode::Color {
                 color: v0,
                 count: 1,
             },
@@ -170,8 +171,7 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
     let v1 = buf[1];
     if v1 >= 1 && v1 <= 63 {
         return Ok((
-            ImageDataCode::Pixels {
-                color: 0,
+            ImageDataCode::Transparent {
                 count: u16::from(v1),
             },
             2,
@@ -190,18 +190,18 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
     }
 
     let v2 = buf[2];
-    if v1 & 0b01000000 == 0b01000000 {
+    if v1 & 0b11000000 == 0b01000000 {
         let v1 = u16::from(v1);
         let v2 = u16::from(v2);
         let n = (v1 & 0b00111111) << 8 | v2;
         let n = n.saturating_sub(1);
-        return Ok((ImageDataCode::Pixels { color: 0, count: n }, 3));
+        return Ok((ImageDataCode::Transparent { count: n }, 3));
     }
 
-    if v1 & 0b10000000 == 0b10000000 {
+    if v1 & 0b11000000 == 0b10000000 {
         let n = u16::from(v1 & 0b00111111);
         let c = v2;
-        return Ok((ImageDataCode::Pixels { color: c, count: n }, 3));
+        return Ok((ImageDataCode::Color { color: c, count: n }, 3));
     }
 
     if buf.len() < 4 {
@@ -217,7 +217,7 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
         let v2 = u16::from(v2);
         let c = v3;
         let n = (v1 & 0b00111111) << 8 | v2;
-        return Ok((ImageDataCode::Pixels { color: c, count: n }, 4));
+        return Ok((ImageDataCode::Color { color: c, count: n }, 4));
     }
 
     return Err(std::io::Error::new(

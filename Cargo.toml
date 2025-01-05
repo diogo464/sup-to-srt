@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 pgs = { path = "./pgs" }
+tesseract = "0.15.1"
+minifb = "0.27.0"

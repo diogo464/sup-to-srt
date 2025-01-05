@@ -1,4 +1,7 @@
-use std::io::{Cursor, Read};
+use std::{
+    io::{Cursor, Read},
+    time::Duration,
+};
 
 pub mod wire;
 
@@ -13,7 +16,7 @@ pub mod wire;
 /// Screen Composition Segment: PCS
 /// Definition Segment: WDS, PDS, ODS, END
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompositionState {
     Normal,
     AcquisitionPoint,
@@ -25,6 +28,12 @@ pub enum LastInSequenceFlag {
     Last,
     First,
     FirstAndLast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ColorCode {
+    Transparent,
+    Color(u8),
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +64,7 @@ pub struct CompositionObject {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Window {
-    /// uniquely identifies the window
+    /// uniquely identifies the window in the epoch
     pub window_id: u8,
     /// range of 1 to (video width)-(window horizontal position)
     pub width: u16,
@@ -67,7 +76,7 @@ pub struct Window {
     pub vertical_position: u16,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct PaletteEntry {
     pub entry_id: u8,
     pub luminance: u8,
@@ -76,9 +85,22 @@ pub struct PaletteEntry {
     pub transparency: u8,
 }
 
+impl PaletteEntry {
+    pub fn to_rgb(&self) -> (u8, u8, u8) {
+        ycbcr_to_rgb(self.luminance, self.color_diff_red, self.color_diff_blue)
+    }
+
+    pub fn to_rgba(&self) -> (u8, u8, u8, u8) {
+        let (r, g, b) = ycbcr_to_rgb(self.luminance, self.color_diff_red, self.color_diff_blue);
+        (r, g, b, self.transparency)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Header {
+    /// presentation time stamp (measured in ticks of 90khz clock)
     pub pts: u32,
+    /// decoding time stamp (measured in ticks of 90khz clock)
     pub dts: u32,
 }
 
@@ -101,8 +123,9 @@ pub struct PCS {
     /// in range 0 - 15
     pub composition_number: u16,
     pub composition_state: CompositionState,
-    ///
+    /// indicates if this PCS describes a Palette only Display Update
     pub palette_update: bool,
+    /// identifies the palette to be used in the Palette only Display Update
     pub palette_id: u8,
     pub composition_objects: Vec<CompositionObject>,
 }
@@ -118,11 +141,11 @@ pub struct WDS {
 #[derive(Debug, Clone)]
 pub struct PDS {
     pub header: Header,
-    /// uniquely identifies the palette
+    /// uniquely identifies the palette in the epoch
     pub palette_id: u8,
     /// version of the palette within the epoch
     pub palette_version: u8,
-    pub entries: Vec<PaletteEntry>,
+    pub entries: [PaletteEntry; 256],
 }
 
 /// Object Definition Segment
@@ -133,12 +156,15 @@ pub struct ODS {
     /// an [`ODS`] segment with an object id that was already seen in the current epoch should
     /// update the existing object.
     pub object_id: u16,
+    /// version of the object within the epoch
     pub object_version: u8,
     pub last_in_sequence: LastInSequenceFlag,
     /// the width for an object id should always be the same for a given epoch.
     pub width: u16,
     /// the height for an object id should always be the same for a given epoch.
     pub height: u16,
+    /// vector with length width * height where each pixel is a color identifier in the palette.
+    pub pixels: Vec<ColorCode>,
 }
 
 /// END of display set segment
@@ -257,16 +283,16 @@ pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
         }
         wire::SEGMENT_TYPE_PDS => {
             let pds = wire::SegmentPDS::read(&mut cursor)?;
-            let mut entries = Vec::new();
+            let mut entries: [PaletteEntry; 256] = unsafe { std::mem::zeroed() };
             while cursor.position() < buffer.len() as u64 {
                 let entry = wire::PaletteEntry::read(&mut cursor)?;
-                entries.push(PaletteEntry {
+                entries[entry.palette_entry_id as usize] = PaletteEntry {
                     entry_id: entry.palette_entry_id,
                     luminance: entry.luminance,
                     color_diff_red: entry.color_diff_red,
                     color_diff_blue: entry.color_diff_blue,
                     transparency: entry.transparency,
-                });
+                };
             }
             Ok(Segment::PDS(PDS {
                 header: Header::from(header),
@@ -294,6 +320,27 @@ pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
                 }
             };
 
+            let pixels_expected_count = ods.width as usize * ods.height as usize;
+            let mut pixels = Vec::with_capacity(pixels_expected_count);
+            let mut pixels_in_line = 0u16;
+            for code in wire::decode_image_data(&data) {
+                let code = code?;
+                let (color, count) = match code {
+                    wire::ImageDataCode::Transparent { count } => (ColorCode::Transparent, count),
+                    wire::ImageDataCode::Color { color, count } => (ColorCode::Color(color), count),
+                    wire::ImageDataCode::EndOfLine => (
+                        ColorCode::Transparent,
+                        pixels_in_line.saturating_sub(ods.width),
+                    ),
+                };
+                pixels_in_line += count;
+                pixels.extend(std::iter::repeat_n(color, count as usize));
+                if code == wire::ImageDataCode::EndOfLine {
+                    pixels_in_line = 0;
+                }
+            }
+            assert_eq!(pixels.len(), pixels_expected_count);
+
             Ok(Segment::ODS(ODS {
                 header: Header::from(header),
                 object_id: ods.object_id,
@@ -301,6 +348,7 @@ pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
                 last_in_sequence: flag,
                 width: ods.width,
                 height: ods.height,
+                pixels,
             }))
         }
         wire::SEGMENT_TYPE_END => Ok(Segment::END(END {
@@ -352,4 +400,43 @@ pub fn decode_display_set<R: Read>(mut reader: R) -> std::io::Result<DisplaySet>
             }
         }
     }
+}
+
+pub fn decode_display_sets<R: Read>(mut reader: R) -> std::io::Result<Vec<DisplaySet>> {
+    let mut display_sets = Vec::default();
+    loop {
+        match decode_display_set(&mut reader) {
+            Ok(display_set) => display_sets.push(display_set),
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(display_sets)
+}
+
+pub fn ycbcr_to_rgb(luminance: u8, cr: u8, cb: u8) -> (u8, u8, u8) {
+    // Convert YCbCr to RGB using the formula
+    let luminance = luminance as f64;
+    let cr = cr as f64;
+    let cb = cb as f64;
+
+    let r = luminance + 1.402 * (cr - 128.0);
+    let g = luminance - 0.344136 * (cb - 128.0) - 0.714136 * (cr - 128.0);
+    let b = luminance + 1.772 * (cb - 128.0);
+
+    // Ensure RGB values are within the 0-255 range
+    let r = r.clamp(0.0, 255.0) as u8;
+    let g = g.clamp(0.0, 255.0) as u8;
+    let b = b.clamp(0.0, 255.0) as u8;
+
+    (r, g, b)
+}
+
+/// convert timestamp in the 90khz clock to a [`std::time::Duration`].
+pub fn clock_to_duration(timestamp: u32) -> Duration {
+    let seconds = timestamp / 90_000;
+    let remain = timestamp % 90_000;
+    let nanos_per_tick = 1_000_000_000 / 90_000;
+    let nanos = remain * nanos_per_tick;
+    Duration::new(u64::from(seconds), nanos)
 }
