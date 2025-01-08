@@ -30,12 +30,6 @@ pub enum LastInSequenceFlag {
     FirstAndLast,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ColorCode {
-    Transparent,
-    Color(u8),
-}
-
 #[derive(Debug, Clone)]
 pub enum Segment {
     PCS(PCS),
@@ -91,8 +85,12 @@ impl PaletteEntry {
     }
 
     pub fn to_rgba(&self) -> (u8, u8, u8, u8) {
-        let (r, g, b) = ycbcr_to_rgb(self.luminance, self.color_diff_red, self.color_diff_blue);
-        (r, g, b, self.transparency)
+        if self.transparency == 0 {
+            (0, 0, 0, 0)
+        } else {
+            let (r, g, b) = ycbcr_to_rgb(self.luminance, self.color_diff_red, self.color_diff_blue);
+            (r, g, b, self.transparency)
+        }
     }
 }
 
@@ -163,8 +161,8 @@ pub struct ODS {
     pub width: u16,
     /// the height for an object id should always be the same for a given epoch.
     pub height: u16,
-    /// vector with length width * height where each pixel is a color identifier in the palette.
-    pub pixels: Vec<ColorCode>,
+    /// vector with rle image data
+    pub data: Vec<u8>,
 }
 
 /// END of display set segment
@@ -320,26 +318,22 @@ pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
                 }
             };
 
-            let pixels_expected_count = ods.width as usize * ods.height as usize;
-            let mut pixels = Vec::with_capacity(pixels_expected_count);
-            let mut pixels_in_line = 0u16;
-            for code in wire::decode_image_data(&data) {
-                let code = code?;
-                let (color, count) = match code {
-                    wire::ImageDataCode::Transparent { count } => (ColorCode::Transparent, count),
-                    wire::ImageDataCode::Color { color, count } => (ColorCode::Color(color), count),
-                    wire::ImageDataCode::EndOfLine => (
-                        ColorCode::Transparent,
-                        pixels_in_line.saturating_sub(ods.width),
-                    ),
-                };
-                pixels_in_line += count;
-                pixels.extend(std::iter::repeat_n(color, count as usize));
-                if code == wire::ImageDataCode::EndOfLine {
-                    pixels_in_line = 0;
-                }
-            }
-            assert_eq!(pixels.len(), pixels_expected_count);
+            // let pixels_expected_count = ods.width as usize * ods.height as usize;
+            // let mut pixels = Vec::with_capacity(pixels_expected_count);
+            // let mut pixels_in_line = 0u16;
+            // for code in wire::decode_image_data(&data) {
+            //     let code = code?;
+            //     let (color, count) = match code {
+            //         wire::ImageDataCode::Color { color, count } => (color, count),
+            //         wire::ImageDataCode::EndOfLine => (0, pixels_in_line.saturating_sub(ods.width)),
+            //     };
+            //     pixels_in_line += count;
+            //     pixels.extend(std::iter::repeat_n(color, count as usize));
+            //     if code == wire::ImageDataCode::EndOfLine {
+            //         pixels_in_line = 0;
+            //     }
+            // }
+            // assert_eq!(pixels.len(), pixels_expected_count);
 
             Ok(Segment::ODS(ODS {
                 header: Header::from(header),
@@ -348,7 +342,7 @@ pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
                 last_in_sequence: flag,
                 width: ods.width,
                 height: ods.height,
-                pixels,
+                data,
             }))
         }
         wire::SEGMENT_TYPE_END => Ok(Segment::END(END {
@@ -439,4 +433,24 @@ pub fn clock_to_duration(timestamp: u32) -> Duration {
     let nanos_per_tick = 1_000_000_000 / 90_000;
     let nanos = remain * nanos_per_tick;
     Duration::new(u64::from(seconds), nanos)
+}
+
+/// decode the rle image data into a vector containing the pixels of the image.
+/// each pixel value is an index into the color palette.
+pub fn decode_rle_data(data: &[u8], width: u16, height: u16) -> std::io::Result<Vec<u8>> {
+    let expected_pixel_count = width as usize * height as usize;
+    let mut pixels = Vec::with_capacity(expected_pixel_count);
+    for code in wire::decode_image_data(data) {
+        let code = code?;
+        if let wire::ImageDataCode::Color { color, count } = code {
+            pixels.extend(std::iter::repeat_n(color, count as usize));
+        }
+    }
+    if pixels.len() != expected_pixel_count {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "rle data expanded with invalid lenght",
+        ));
+    }
+    Ok(pixels)
 }

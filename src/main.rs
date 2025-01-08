@@ -1,225 +1,356 @@
 use std::{
-    collections::HashMap,
-    io::{Cursor, Write},
-    process::Command,
+    collections::{HashMap, VecDeque},
+    io::{Cursor, Read},
+    path::PathBuf,
+    time::Duration,
 };
 
+use clap::Parser;
+use color_eyre::{
+    eyre::{eyre, Context},
+    Result,
+};
 use minifb::{Key, KeyRepeat};
-use pgs::wire::PALETTE_UPDATE_FLAG_TRUE;
+use slotmap::{SecondaryMap, SlotMap};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Color {
-    r: u8,
-    g: u8,
-    b: u8,
-    a: u8,
+#[derive(Debug, Parser)]
+struct Args {
+    input: Option<PathBuf>,
 }
 
-struct Palette {
-    colors: Vec<Color>,
+slotmap::new_key_type! {
+   struct SubtitleId;
 }
 
-impl Palette {
-    pub fn get_color(&self, id: u32) -> Option<Color> {
-        self.colors.get(id as usize).copied()
-    }
+struct Object {
+    width: u16,
+    height: u16,
+    finished: bool,
+    data: Vec<u8>,
+    image: Image,
 }
 
+#[derive(Default, Clone)]
 struct Image {
-    data: Vec<u32>,
-    width: usize,
-    height: usize,
+    width: u32,
+    height: u32,
+    /// RGBA 8-bit per channel
+    pixels: Vec<u8>,
 }
 
-fn main() {
-    let data = std::fs::read("output.sup").unwrap();
-    let cursor = Cursor::new(&data);
-    let display_sets = pgs::decode_display_sets(cursor).unwrap();
-    //println!("num display sets = {}", display_sets.len());
+impl Image {
+    fn sub_image(&self, top_left_x: u32, top_left_y: u32, width: u32, height: u32) -> Image {
+        self.clone()
+    }
+}
 
-    assert!(display_sets.len() > 0);
-    let display_set_0 = &display_sets[0];
-    assert_eq!(
-        display_set_0.pcs.composition_state,
-        pgs::CompositionState::EpochStart
-    );
+struct DurationSrtDisplay(Duration);
 
-    let display_width = display_set_0.pcs.width;
-    let display_height = display_set_0.pcs.height;
-    let mut current_epoch = 0;
-    let mut objects: HashMap<u16, pgs::ODS> = Default::default();
-    let mut windows: HashMap<u8, pgs::Window> = Default::default();
-    let mut palettes: HashMap<u8, pgs::PDS> = Default::default();
+impl std::fmt::Display for DurationSrtDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total_secs = self.0.as_secs();
+        let hours = total_secs / 3600;
+        let minutes = (total_secs / 60) % 60;
+        let seconds = total_secs % 60;
+        let millis = self.0.subsec_millis();
+        write!(f, "{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
+    }
+}
 
-    let mut tesseract = tesseract::Tesseract::new(None, Some("eng")).unwrap();
-    let mut frame: Vec<u8> = Vec::default();
-    let mut frame_rgb: Vec<u32> = Default::default();
-    let mut frame_width = 0;
-    let mut frame_height = 0;
-    let mut images: Vec<Image> = Default::default();
-    let mut palette_shown = false;
+struct Subtitle {
+    image: Image,
+    start: Duration,
+    end: Duration,
+}
 
-    let mut window = minifb::Window::new(
-        "sup2srt",
-        1200,
-        1200,
-        minifb::WindowOptions {
-            scale_mode: minifb::ScaleMode::Center,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    window.set_target_fps(60);
+fn main() -> Result<()> {
+    color_eyre::install().unwrap();
+    tracing_subscriber::fmt::init();
 
-    for ds in display_sets {
-        assert_eq!(ds.pcs.width, display_width);
-        assert_eq!(ds.pcs.height, display_height);
-        // println!(
-        //     "time = {}",
-        //     pgs::clock_to_duration(ds.pcs.header.pts).as_secs_f64()
-        // );
-        match ds.pcs.composition_state {
-            pgs::CompositionState::EpochStart => {
-                current_epoch += 1;
-                objects.clear();
-                windows.clear();
-                palettes.clear();
-                //println!("transition to epoch {current_epoch}");
-            }
-            pgs::CompositionState::Normal => {}
-            pgs::CompositionState::AcquisitionPoint => {}
+    let args = Args::parse();
+    let input_data = match args.input {
+        Some(path) => {
+            tracing::info!("reading from {}", path.display());
+            std::fs::read(&path).context("reading from input file")?
         }
-
-        for composition in ds.pcs.composition_objects {
-            // println!(
-            //     "composition obj={} wnd={}",
-            //     composition.object_id, composition.window_id
-            // );
+        None => {
+            tracing::info!("reading from stdin");
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = Vec::default();
+            stdin.read_to_end(&mut buf).context("reading from stdin")?;
+            buf
         }
+    };
 
-        for pds in ds.pds {
-            //println!("palette id = {}", pds.palette_id);
-            // if !palette_shown {
-            //     palette_shown = true;
-            //     for entry in &pds.entries {
-            //         println!("#{} {:?}", entry.entry_id, entry.to_rgba());
-            //     }
-            // }
-            palettes.insert(pds.palette_id, pds);
-        }
+    let mut subtitles: SlotMap<SubtitleId, Subtitle> = Default::default();
+    let mut subtitles_text: SecondaryMap<SubtitleId, String> = Default::default();
 
-        for wds in ds.wds {
-            for window in wds.windows {
-                // println!(
-                //     "window id = {} {}x{}",
-                //     window.window_id, window.width, window.height
-                // );
-                windows.insert(window.window_id, window);
-            }
-        }
+    // extract subtitles
+    for subtitle in extract_subtitles_from_pgs(&input_data)? {
+        subtitles.insert(subtitle);
+    }
+    tracing::info!("extracted {} subtitles", subtitles.len());
 
-        for object in ds.ods {
-            let palette = palettes.get_mut(&0).unwrap();
-            frame.clear();
-            frame_rgb.clear();
-            frame_width = object.width as u32;
-            frame_height = object.height as u32;
-            for &pixel in object.pixels.iter() {
-                let (mut r, mut g, mut b, a) = match pixel {
-                    pgs::ColorCode::Transparent => {
-                        //println!("0");
-                        //(0, 0, 0, 0)
-                        let entry = &palette.entries[0];
-                        entry.to_rgba()
-                    }
-                    pgs::ColorCode::Color(idx) => {
-                        //println!("{idx}");
-                        let entry = &palette.entries[idx as usize];
-                        entry.to_rgba()
-                    }
-                };
-                if a == 0 {
-                    r = 0;
-                    g = 0;
-                    b = 0;
+    // subtitle ocr
+    let (ocr_in_sender, ocr_in_receiver) = crossbeam::channel::unbounded::<SubtitleId>();
+    let (ocr_out_sender, ocr_out_receiver) =
+        crossbeam::channel::unbounded::<(SubtitleId, String)>();
+
+    for subtitle_id in subtitles.keys() {
+        ocr_in_sender.send(subtitle_id).unwrap();
+    }
+    drop(ocr_in_sender);
+
+    tracing::info!("starting ocr");
+    std::thread::scope(|scope| -> Result<()> {
+        let mut handles = Vec::new();
+        for _ in 0..std::thread::available_parallelism()
+            .map(|v| usize::from(v))
+            .unwrap_or(4)
+        {
+            let handle = scope.spawn(|| -> Result<()> {
+                let mut tesseract = tesseract::Tesseract::new(None, Some("eng"))
+                    .context("initializing tesseract")?;
+                while let Ok(subtitle_id) = ocr_in_receiver.recv() {
+                    let image = &subtitles[subtitle_id].image;
+                    tesseract = tesseract
+                        .set_frame(
+                            &image.pixels,
+                            image.width as i32,
+                            image.height as i32,
+                            4,
+                            image.width as i32 * 4,
+                        )
+                        .context("setting tesseract frame")?;
+                    tesseract = tesseract.recognize().context("tesseract recognize")?;
+                    let text = tesseract.get_text().context("tesseract get text")?;
+                    ocr_out_sender.send((subtitle_id, text)).unwrap();
                 }
-                frame.push(r);
-                frame.push(g);
-                frame.push(b);
-                frame.push(a);
-                frame_rgb.push((r as u32) << 16 | (g as u32) << 8 | (b as u32));
-            }
-            images.push(Image {
-                data: frame_rgb.clone(),
-                width: frame_width as usize,
-                height: frame_height as usize,
+                Ok(())
             });
-            tesseract = tesseract
-                .set_frame(
-                    &frame,
-                    object.width as i32,
-                    object.height as i32,
-                    4,
-                    4 * object.width as i32,
-                )
-                .unwrap();
-            tesseract = tesseract.recognize().unwrap();
-            let text = tesseract.get_text().unwrap();
-            println!("{text}");
-
-            // use std::fmt::Write;
-            //
-            // let mut ppm = String::default();
-            // //println!("object id = {}", object.object_id);
-            // writeln!(ppm, "P3\n{} {}\n255", object.width, object.height);
-            // let palette = &palettes[&0];
-            // let mut i = 0usize;
-            // for &pixel in object.pixels.iter() {
-            //     let entry = &palette.entries[pixel as usize];
-            //     let (r, g, b, _a) = entry.to_rgba();
-            //     write!(ppm, "{r} {g} {b}");
-            //     if i > 0 && i % object.width as usize == 0 {
-            //         writeln!(ppm, "");
-            //     } else {
-            //         write!(ppm, " ");
-            //     }
-            //     i += 1;
-            // }
-            //
-            // let text = recognize(&ppm);
-            // println!("{text}\n\n");
-
-            objects.insert(object.object_id, object);
+            handles.push(handle);
         }
+        for handle in handles {
+            handle.join().unwrap()?;
+        }
+        Ok(())
+    })?;
+
+    drop(ocr_out_sender);
+    while let Ok((subtitle_id, text)) = ocr_out_receiver.recv() {
+        subtitles_text.insert(subtitle_id, text);
+    }
+    tracing::info!("ocr finished");
+
+    // produce srt
+    let mut queue: VecDeque<SubtitleId> = Default::default();
+    for subtitle_id in subtitles.keys() {
+        queue.push_back(subtitle_id);
     }
 
+    let mut srt = String::default();
+    let mut current_text = String::default();
+    let mut current_sub_num = 1;
+    for (subtitle_id, subtitle) in subtitles.iter() {
+        use std::fmt::Write;
+
+        let subtitle_text = &subtitles_text[subtitle_id];
+        let _ = writeln!(srt, "{current_sub_num}");
+        let _ = writeln!(
+            srt,
+            "{} --> {}",
+            DurationSrtDisplay(subtitle.start),
+            DurationSrtDisplay(subtitle.end)
+        );
+        srt.push_str(&subtitle_text);
+        srt.push_str("\n");
+        current_sub_num += 1;
+    }
+    println!("{}", srt);
+
+    return Ok(());
+
+    // let mut window = minifb::Window::new(
+    //     "sup2srt",
+    //     1200,
+    //     1200,
+    //     minifb::WindowOptions {
+    //         scale_mode: minifb::ScaleMode::Center,
+    //         ..Default::default()
+    //     },
+    // )
+    // .unwrap();
+    // window.set_target_fps(60);
+    //
     // let mut curr_image = 0usize;
     // while window.is_open() && !window.is_key_down(Key::Escape) {
     //     if window.is_key_pressed(Key::A, KeyRepeat::No) {
     //         curr_image = curr_image.saturating_sub(1);
     //     }
     //     if window.is_key_pressed(Key::D, KeyRepeat::No) {
-    //         curr_image = images.len().saturating_sub(1).min(curr_image + 1);
+    //         curr_image = subtitles.len().saturating_sub(1).min(curr_image + 1);
     //     }
     //
-    //     let image = &images[curr_image];
+    //     let image = &subtitles[curr_image].image;
+    //     let mut buffer = Vec::with_capacity(image.pixels.len() / 4);
+    //     for i in 0..image.pixels.len() / 4 {
+    //         let v = ((image.pixels[i * 4] as u32) << 16)
+    //             | ((image.pixels[i * 4 + 1] as u32) << 8)
+    //             | ((image.pixels[i * 4 + 2] as u32) << 0);
+    //         buffer.push(v);
+    //     }
     //     window
-    //         .update_with_buffer(&image.data, image.width, image.height)
+    //         .update_with_buffer(&buffer, image.width as usize, image.height as usize)
     //         .unwrap();
     // }
+
+    Ok(())
 }
 
-fn recognize(ppm: &str) -> String {
-    let mut child = Command::new("tesseract")
-        .arg("-")
-        .arg("-")
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdin = child.stdin.as_mut().unwrap();
-    stdin.write_all(ppm.as_bytes()).unwrap();
-    let output = child.wait_with_output().unwrap();
-    String::from_utf8(output.stdout).unwrap()
+fn image_from_object_and_palette(object: &Object, palette: &pgs::PDS) -> Result<Image> {
+    let pixels_indexed = pgs::decode_rle_data(&object.data, object.width, object.height)
+        .context("decoding ODS rle data")?;
+    let mut pixels = Vec::with_capacity(pixels_indexed.len());
+    for idx in pixels_indexed {
+        let (r, g, b, a) = palette.entries[idx as usize].to_rgba();
+        pixels.extend([r, g, b, a]);
+    }
+    Ok(Image {
+        width: u32::from(object.width),
+        height: u32::from(object.height),
+        pixels,
+    })
+}
+
+fn extract_subtitles_from_pgs(pgs: &[u8]) -> Result<Vec<Subtitle>> {
+    let display_sets = pgs::decode_display_sets(Cursor::new(pgs)).context("parsing pgs")?;
+    if display_sets.is_empty() {
+        tracing::warn!("display_sets.len() = 0 ");
+        return Ok(Default::default());
+    }
+
+    let display_set_0 = &display_sets[0];
+    if display_set_0.pcs.composition_state != pgs::CompositionState::EpochStart {
+        return Err(eyre!("display set 0 does not start an epoch"));
+    }
+
+    let display_width = display_set_0.pcs.width;
+    let display_height = display_set_0.pcs.height;
+    let mut current_epoch = 0;
+    let mut objects: HashMap<u16, Object> = Default::default();
+    let mut palettes: HashMap<u8, pgs::PDS> = Default::default();
+    let mut subtitles: Vec<Subtitle> = Vec::default();
+    // index of images inserted in the previous display set
+    // used to patch the end time
+    let mut previous_subtitles: Vec<usize> = Vec::default();
+
+    for ds in display_sets {
+        assert_eq!(ds.pcs.width, display_width);
+        assert_eq!(ds.pcs.height, display_height);
+
+        let current_time = pgs::clock_to_duration(ds.pcs.header.pts);
+        for subtitle_idx in previous_subtitles.drain(..) {
+            subtitles[subtitle_idx].end = current_time;
+        }
+
+        match ds.pcs.composition_state {
+            pgs::CompositionState::EpochStart => {
+                current_epoch += 1;
+                objects.clear();
+                palettes.clear();
+                tracing::debug!("moving to epoch {current_epoch}");
+            }
+            pgs::CompositionState::Normal => {}
+            pgs::CompositionState::AcquisitionPoint => {}
+        }
+
+        for pds in ds.pds {
+            tracing::debug!("found palette {}", pds.palette_id);
+            palettes.insert(pds.palette_id, pds);
+        }
+
+        let palette = match palettes.get(&ds.pcs.palette_id) {
+            Some(palette) => palette,
+            None => {
+                return Err(eyre!("PCS referenced invalid palette"));
+            }
+        };
+
+        for ods in ds.ods {
+            let obj = objects.entry(ods.object_id).or_insert(Object {
+                width: ods.width,
+                height: ods.height,
+                finished: false,
+                data: Default::default(),
+                image: Default::default(),
+            });
+
+            match ods.last_in_sequence {
+                pgs::LastInSequenceFlag::FirstAndLast => {
+                    obj.finished = true;
+                    obj.data.clear();
+                    obj.data.extend(ods.data);
+                    obj.image = image_from_object_and_palette(obj, palette)?;
+                }
+                pgs::LastInSequenceFlag::First => {
+                    obj.finished = false;
+                    obj.data.clear();
+                    obj.data.extend(ods.data);
+                }
+                pgs::LastInSequenceFlag::Last => {
+                    if obj.finished {
+                        tracing::error!(
+                            "received ODS with flag LAST but object was already finished"
+                        );
+                        return Err(eyre!("invalid ods segment"));
+                    }
+                    obj.finished = true;
+                    obj.data.extend(ods.data);
+                    obj.image = image_from_object_and_palette(obj, palette)?;
+                }
+            }
+        }
+
+        for comp in ds.pcs.composition_objects {
+            let object = match objects.get(&comp.object_id) {
+                Some(object) => object,
+                None => {
+                    tracing::warn!(
+                        "invalid object id in composition object: {}",
+                        comp.object_id
+                    );
+                    continue;
+                }
+            };
+
+            if !object.finished {
+                tracing::warn!(
+                    "unfinished object in composition object: {}",
+                    comp.object_id
+                );
+                continue;
+            }
+
+            let image = if let Some(cropping) = comp.cropping {
+                let image = object.image.sub_image(
+                    u32::from(cropping.horizontal_position),
+                    u32::from(cropping.vertical_position),
+                    u32::from(cropping.width),
+                    u32::from(cropping.height),
+                );
+                image
+            } else {
+                object.image.clone()
+            };
+
+            previous_subtitles.push(subtitles.len());
+            subtitles.push(Subtitle {
+                image,
+                start: current_time,
+                end: Default::default(),
+            });
+        }
+    }
+
+    Ok(subtitles)
 }

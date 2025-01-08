@@ -111,7 +111,6 @@ pub struct SegmentODS {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageDataCode {
     Color { color: u8, count: u16 },
-    Transparent { count: u16 },
     EndOfLine,
 }
 
@@ -171,7 +170,8 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
     let v1 = buf[1];
     if v1 >= 1 && v1 <= 63 {
         return Ok((
-            ImageDataCode::Transparent {
+            ImageDataCode::Color {
+                color: 0,
                 count: u16::from(v1),
             },
             2,
@@ -195,7 +195,7 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
         let v2 = u16::from(v2);
         let n = (v1 & 0b00111111) << 8 | v2;
         let n = n.saturating_sub(1);
-        return Ok((ImageDataCode::Transparent { count: n }, 3));
+        return Ok((ImageDataCode::Color { color: 0, count: n }, 3));
     }
 
     if v1 & 0b11000000 == 0b10000000 {
