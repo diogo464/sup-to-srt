@@ -1,0 +1,10 @@
+name: check
+on: [push] 
+jobs: 
+  check:
+    runs-on: [fedora-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo check && cargo test
