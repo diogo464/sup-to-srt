@@ -318,23 +318,6 @@ pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
                 }
             };
 
-            // let pixels_expected_count = ods.width as usize * ods.height as usize;
-            // let mut pixels = Vec::with_capacity(pixels_expected_count);
-            // let mut pixels_in_line = 0u16;
-            // for code in wire::decode_image_data(&data) {
-            //     let code = code?;
-            //     let (color, count) = match code {
-            //         wire::ImageDataCode::Color { color, count } => (color, count),
-            //         wire::ImageDataCode::EndOfLine => (0, pixels_in_line.saturating_sub(ods.width)),
-            //     };
-            //     pixels_in_line += count;
-            //     pixels.extend(std::iter::repeat_n(color, count as usize));
-            //     if code == wire::ImageDataCode::EndOfLine {
-            //         pixels_in_line = 0;
-            //     }
-            // }
-            // assert_eq!(pixels.len(), pixels_expected_count);
-
             Ok(Segment::ODS(ODS {
                 header: Header::from(header),
                 object_id: ods.object_id,
