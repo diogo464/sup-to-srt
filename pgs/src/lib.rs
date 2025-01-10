@@ -454,3 +454,16 @@ pub fn decode_rle_data(data: &[u8], width: u16, height: u16) -> std::io::Result<
     }
     Ok(pixels)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    const PGS: &'static [u8] = include_bytes!("../subtitle.sup");
+
+    #[test]
+    fn decode_subtitles() {
+        let display_sets = decode_display_sets(Cursor::new(PGS)).unwrap();
+        insta::assert_compact_debug_snapshot!(display_sets);
+    }
+}

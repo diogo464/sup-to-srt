@@ -475,3 +475,18 @@ fn subtitles_viewer(subtitles: Vec<BitmapSubtitle>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    const PGS: &'static [u8] = include_bytes!("../subtitle.sup");
+
+    #[test]
+    fn test_subtitles_to_srt() {
+        let bitmap_subtitles = subtitles_extract(PGS).unwrap();
+        let text_subtitles = subtitles_ocr(bitmap_subtitles).unwrap();
+        let srt = subtitles_to_srt(text_subtitles);
+        insta::assert_snapshot!(srt);
+    }
+}
