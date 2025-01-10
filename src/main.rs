@@ -10,6 +10,7 @@ use color_eyre::{
     eyre::{eyre, Context},
     Result,
 };
+#[cfg(feature = "viewer")]
 use minifb::{Key, KeyRepeat};
 
 #[derive(Debug, Parser)]
@@ -104,7 +105,10 @@ fn main() -> Result<()> {
     tracing::info!("extracted {} bitmap subtitles", bitmap_subtitles.len());
 
     if args.view {
+        #[cfg(feature = "viewer")]
         subtitles_viewer(bitmap_subtitles)?;
+        #[cfg(not(feature = "viewer"))]
+        return Err(color_eyre::eyre::eyre!("viewer support not compiled"));
     } else {
         tracing::info!("performing OCR on bitmap subtitles");
         let text_subtitles = subtitles_ocr(bitmap_subtitles)?;
@@ -433,6 +437,7 @@ fn subtitles_to_srt(subtitles: Vec<TextSubtitle>) -> String {
     srt
 }
 
+#[cfg(feature = "viewer")]
 fn subtitles_viewer(subtitles: Vec<BitmapSubtitle>) -> Result<()> {
     let mut window = minifb::Window::new(
         "sup2srt",
