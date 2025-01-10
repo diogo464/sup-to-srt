@@ -1,0 +1,5 @@
+/.git
+/Containerfile
+/build.sh
+/*.srt
+/*.sup
