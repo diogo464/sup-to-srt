@@ -444,7 +444,13 @@ pub fn decode_rle_data(data: &[u8], width: u16, height: u16) -> std::io::Result<
     if pixels.len() != expected_pixel_count {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "rle data expanded with invalid lenght",
+            format!(
+                "rle data expanded to {} pixels, expected {} ({}x{})",
+                pixels.len(),
+                expected_pixel_count,
+                width,
+                height,
+            ),
         ));
     }
     Ok(pixels)
