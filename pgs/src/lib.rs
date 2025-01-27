@@ -23,7 +23,7 @@ pub enum CompositionState {
     EpochStart,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LastInSequenceFlag {
     Last,
     First,
