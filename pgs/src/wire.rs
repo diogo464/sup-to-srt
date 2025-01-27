@@ -168,7 +168,10 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
     }
 
     let v1 = buf[1];
-    if v1 >= 1 && v1 <= 63 {
+    if v1 == 0 {
+        return Ok((ImageDataCode::EndOfLine, 2));
+    }
+    if v1 <= 63 {
         return Ok((
             ImageDataCode::Color {
                 color: 0,
@@ -176,10 +179,6 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
             },
             2,
         ));
-    }
-
-    if v1 == 0 {
-        return Ok((ImageDataCode::EndOfLine, 2));
     }
 
     if buf.len() < 3 {
@@ -194,7 +193,6 @@ pub fn decode_image_data_code(buf: &[u8]) -> std::io::Result<(ImageDataCode, usi
         let v1 = u16::from(v1);
         let v2 = u16::from(v2);
         let n = (v1 & 0b00111111) << 8 | v2;
-        let n = n.saturating_sub(1);
         return Ok((ImageDataCode::Color { color: 0, count: n }, 3));
     }
 
