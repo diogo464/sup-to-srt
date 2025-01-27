@@ -147,7 +147,7 @@ fn subtitles_extract(pgs: &[u8]) -> Result<Vec<BitmapSubtitle>> {
         })
     }
 
-    let display_sets = pgs::decode_display_sets(Cursor::new(pgs)).context("parsing pgs")?;
+    let display_sets = pgs::decode_display_sets(pgs).context("parsing pgs")?;
     if display_sets.is_empty() {
         tracing::warn!("display_sets.len() = 0 ");
         return Ok(Default::default());

@@ -180,7 +180,11 @@ pub struct DisplaySet {
     pub end: END,
 }
 
-pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
+pub fn decode_segment(data: &[u8]) -> std::io::Result<Segment> {
+    decode_segment_reader(Cursor::new(data))
+}
+
+pub fn decode_segment_reader<R: Read>(mut reader: R) -> std::io::Result<Segment> {
     use wire::Wire;
 
     let header = wire::SegmentHeader::read(&mut reader)?;
@@ -340,8 +344,12 @@ pub fn decode_segment<R: Read>(mut reader: R) -> std::io::Result<Segment> {
     }
 }
 
-pub fn decode_display_set<R: Read>(mut reader: R) -> std::io::Result<DisplaySet> {
-    let pcs = match decode_segment(&mut reader)? {
+pub fn decode_display_set(data: &[u8]) -> std::io::Result<DisplaySet> {
+    decode_display_set_reader(Cursor::new(data))
+}
+
+pub fn decode_display_set_reader<R: Read>(mut reader: R) -> std::io::Result<DisplaySet> {
+    let pcs = match decode_segment_reader(&mut reader)? {
         Segment::PCS(pcs) => pcs,
         _ => {
             return Err(std::io::Error::new(
@@ -356,7 +364,7 @@ pub fn decode_display_set<R: Read>(mut reader: R) -> std::io::Result<DisplaySet>
     let mut vods = Vec::new();
 
     loop {
-        match decode_segment(&mut reader)? {
+        match decode_segment_reader(&mut reader)? {
             Segment::PCS(_) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -379,10 +387,14 @@ pub fn decode_display_set<R: Read>(mut reader: R) -> std::io::Result<DisplaySet>
     }
 }
 
-pub fn decode_display_sets<R: Read>(mut reader: R) -> std::io::Result<Vec<DisplaySet>> {
+pub fn decode_display_sets(data: &[u8]) -> std::io::Result<Vec<DisplaySet>> {
+    decode_display_sets_reader(Cursor::new(data))
+}
+
+pub fn decode_display_sets_reader<R: Read>(mut reader: R) -> std::io::Result<Vec<DisplaySet>> {
     let mut display_sets = Vec::default();
     loop {
-        match decode_display_set(&mut reader) {
+        match decode_display_set_reader(&mut reader) {
             Ok(display_set) => display_sets.push(display_set),
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(err) => return Err(err),
@@ -446,7 +458,7 @@ mod test {
 
     #[test]
     fn decode_subtitles() {
-        let display_sets = decode_display_sets(Cursor::new(PGS)).unwrap();
+        let display_sets = decode_display_sets(PGS).unwrap();
         insta::assert_compact_debug_snapshot!(display_sets);
     }
 }
