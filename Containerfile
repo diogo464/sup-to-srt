@@ -1,4 +1,4 @@
-FROM docker.io/rust:1.84-slim AS builder
+FROM docker.io/rust:1.94.1-slim-trixie AS builder
 WORKDIR /usr/src/
 COPY . .
 RUN apt update && apt install -y pkg-config libclang-dev libleptonica-dev libtesseract-dev
