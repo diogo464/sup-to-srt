@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{Cursor, Read},
+    io::Read,
     path::PathBuf,
     time::Duration,
 };
@@ -28,6 +28,13 @@ struct Args {
     /// output srt file, must not exist.
     /// if not specified then the output goes to stdout.
     output: Option<PathBuf>,
+
+    /// Tesseract language code to use for OCR.
+    ///
+    /// Available language codes can be found at:
+    /// https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html
+    #[clap(long, default_value = "eng")]
+    language: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +118,7 @@ fn main() -> Result<()> {
         return Err(color_eyre::eyre::eyre!("viewer support not compiled"));
     } else {
         tracing::info!("performing OCR on bitmap subtitles");
-        let text_subtitles = subtitles_ocr(bitmap_subtitles)?;
+        let text_subtitles = subtitles_ocr(bitmap_subtitles, &args.language)?;
         tracing::info!("OCR complete");
 
         tracing::info!("generating srt");
@@ -278,7 +285,7 @@ fn subtitles_extract(pgs: &[u8]) -> Result<Vec<BitmapSubtitle>> {
     Ok(subtitles)
 }
 
-fn subtitles_ocr(subtitles: Vec<BitmapSubtitle>) -> Result<Vec<TextSubtitle>> {
+fn subtitles_ocr(subtitles: Vec<BitmapSubtitle>, language: &str) -> Result<Vec<TextSubtitle>> {
     let mut text_subtitles = Vec::with_capacity(subtitles.len());
     let (ocr_in_sender, ocr_in_receiver) = crossbeam::channel::unbounded::<BitmapSubtitle>();
     let (ocr_out_sender, ocr_out_receiver) = crossbeam::channel::unbounded::<TextSubtitle>();
@@ -296,7 +303,7 @@ fn subtitles_ocr(subtitles: Vec<BitmapSubtitle>) -> Result<Vec<TextSubtitle>> {
             .unwrap_or(4)
         {
             let handle = scope.spawn(|| -> Result<()> {
-                let mut tesseract = tesseract::Tesseract::new(None, Some("eng"))
+                let mut tesseract = tesseract::Tesseract::new(None, Some(language))
                     .context("initializing tesseract")?;
                 while let Ok(subtitle) = ocr_in_receiver.recv() {
                     let image = &subtitle.bitmap;
@@ -485,7 +492,7 @@ mod test {
     #[test]
     fn test_subtitles_to_srt() {
         let bitmap_subtitles = subtitles_extract(PGS).unwrap();
-        let text_subtitles = subtitles_ocr(bitmap_subtitles).unwrap();
+        let text_subtitles = subtitles_ocr(bitmap_subtitles, "eng").unwrap();
         let srt = subtitles_to_srt(text_subtitles);
         insta::assert_snapshot!(srt);
     }
